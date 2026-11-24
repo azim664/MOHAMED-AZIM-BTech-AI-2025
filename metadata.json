@@ -1,0 +1,6 @@
+{
+  "name": "CineVault — Movie Ticket Booking",
+  "description": "Decoupled 3-tier online movie ticket booking system with a SQLite/MySQL relational database backend and a dark glassmorphic single-page application.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

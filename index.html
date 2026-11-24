@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CineVault — Movie Ticket Booking</title>
+    <meta
+      name="description"
+      content="Decoupled 3-tier online movie ticket booking system with a SQLite/MySQL relational database backend and a dark glassmorphic single-page application."
+    />
+    <meta property="og:title" content="CineVault — Movie Ticket Booking" />
+    <meta
+      property="og:description"
+      content="Decoupled 3-tier online movie ticket booking system with a SQLite/MySQL relational database backend and a dark glassmorphic single-page application."
+    />
+    <meta property="og:type" content="website" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="ambient-backdrop" aria-hidden="true"></div>
+
+    <!-- Top Navigation Bar -->
+    <header class="top-nav">
+      <div class="nav-inner">
+        <button type="button" class="brand-btn" id="brand-home-btn" aria-label="Go to Now Showing">
+          <svg class="brand-icon" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+            <rect x="2" y="5" width="24" height="18" rx="4" stroke="currentColor" stroke-width="2" />
+            <circle cx="14" cy="14" r="4.5" stroke="#E11D48" stroke-width="2" />
+            <path d="M7 5V23M21 5V23" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.45" />
+          </svg>
+          <span class="brand-name">CineVault</span>
+        </button>
+
+        <nav class="nav-links" aria-label="Primary Navigation">
+          <button type="button" class="nav-link active" id="nav-movies-btn">Now Showing</button>
+          <button type="button" class="nav-link" id="nav-bookings-btn">My Bookings</button>
+        </nav>
+
+        <div class="db-status-pill" id="db-status-pill" role="status" aria-live="polite">
+          <span class="db-status-indicator" aria-hidden="true"></span>
+          <span id="db-status-text">Connecting to Database…</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- 3-Step Booking Progress Indicator -->
+    <div class="progress-shell" id="progress-shell">
+      <ol class="progress-steps" aria-label="Booking Progress">
+        <li class="progress-step active" data-step="1">
+          <button type="button" class="step-trigger" data-step-target="1">
+            <span class="step-num">1</span>
+            <span class="step-label">Select Movie</span>
+          </button>
+        </li>
+        <li class="progress-connector" aria-hidden="true"></li>
+        <li class="progress-step" data-step="2">
+          <button type="button" class="step-trigger" data-step-target="2" disabled>
+            <span class="step-num">2</span>
+            <span class="step-label">Showtime</span>
+          </button>
+        </li>
+        <li class="progress-connector" aria-hidden="true"></li>
+        <li class="progress-step" data-step="3">
+          <button type="button" class="step-trigger" data-step-target="3" disabled>
+            <span class="step-num">3</span>
+            <span class="step-label">Select Seats</span>
+          </button>
+        </li>
+      </ol>
+    </div>
+
+    <!-- Global Toast / Alert Banner -->
+    <div class="toast-container" id="toast-container" aria-live="assertive"></div>
+
+    <main class="main-container">
+      <!-- STAGE 1: Now Showing (Movie Catalog) -->
+      <section id="stage-movies" class="stage-section active" aria-labelledby="movies-heading">
+        <div class="section-header">
+          <div>
+            <h1 id="movies-heading" class="page-title">Now Showing</h1>
+            <p class="page-subtitle">
+              Select a film to explore live auditorium schedules and reserve your seats.
+            </p>
+          </div>
+          <div class="filter-bar" id="genre-filter-bar" role="tablist" aria-label="Filter movies by language">
+            <button type="button" class="filter-tab active" data-lang="ALL">All Languages</button>
+            <button type="button" class="filter-tab" data-lang="English">English</button>
+            <button type="button" class="filter-tab" data-lang="Hindi">Hindi</button>
+            <button type="button" class="filter-tab" data-lang="Tamil">Tamil</button>
+          </div>
+        </div>
+
+        <div id="movies-grid" class="movies-grid">
+          <!-- Populated dynamically via GET /api/movies -->
+        </div>
+      </section>
+
+      <!-- STAGE 2: Venue & Showtime Selection -->
+      <section id="stage-shows" class="stage-section" aria-labelledby="shows-heading" hidden>
+        <div class="stage-topbar">
+          <button type="button" class="back-btn" id="back-to-movies-btn">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <span>Back to Movies</span>
+          </button>
+        </div>
+
+        <div id="selected-movie-banner" class="movie-summary-card glass-panel">
+          <!-- Populated dynamically -->
+        </div>
+
+        <div class="venues-header">
+          <h2 id="shows-heading" class="section-title">Select Theater &amp; Showtime</h2>
+          <p class="section-caption">Live schedules queried across theaters and projection screens</p>
+        </div>
+
+        <div id="theaters-list" class="theaters-list">
+          <!-- Populated dynamically via GET /api/shows?movie_id={id} -->
+        </div>
+      </section>
+
+      <!-- STAGE 3: Interactive Auditorium Seat Matrix -->
+      <section id="stage-seats" class="stage-section" aria-labelledby="seats-heading" hidden>
+        <div class="stage-topbar">
+          <button type="button" class="back-btn" id="back-to-shows-btn">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <span>Change Showtime</span>
+          </button>
+        </div>
+
+        <div id="show-context-bar" class="show-context-bar glass-panel">
+          <!-- Populated dynamically -->
+        </div>
+
+        <div class="auditorium-panel glass-panel">
+          <div class="auditorium-header">
+            <h2 id="seats-heading" class="section-title">Choose Your Seats</h2>
+            <p class="section-caption">Select up to 6 seats per booking. Pricing includes tier layout.</p>
+          </div>
+
+          <!-- Curved Screen Banner -->
+          <div class="cinema-screen-wrap" aria-hidden="true">
+            <div class="cinema-screen-arc"></div>
+            <div class="cinema-screen-glow"></div>
+            <span class="cinema-screen-label">SCREEN THIS WAY</span>
+          </div>
+
+          <!-- Seat Legend -->
+          <div class="seat-legend" role="region" aria-label="Seat status legend">
+            <div class="legend-item">
+              <span class="legend-swatch swatch-available" aria-hidden="true"></span>
+              <span>Available</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-swatch swatch-selected" aria-hidden="true"></span>
+              <span>Selected</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-swatch swatch-booked" aria-hidden="true"></span>
+              <span>Booked (DB)</span>
+            </div>
+          </div>
+
+          <!-- Interactive 60-Seat Grid -->
+          <div class="seat-matrix-scroll">
+            <div id="seat-matrix" class="seat-matrix" role="group" aria-label="60 seat auditorium layout">
+              <!-- Populated dynamically via GET /api/show-seats?show_id={id} -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Sticky Bottom Selection Bar -->
+        <div class="sticky-seat-bar glass-panel" id="sticky-seat-bar">
+          <div class="sticky-seat-info">
+            <div class="sticky-count-group">
+              <span class="sticky-label">Selected Seats</span>
+              <strong class="sticky-seats-value" id="sticky-seats-text">None selected (0 / 6)</strong>
+            </div>
+            <div class="sticky-price-group">
+              <span class="sticky-label">Tickets Total</span>
+              <strong class="sticky-total-value" id="sticky-total-text">₹0.00</strong>
+            </div>
+          </div>
+          <button type="button" class="primary-btn" id="proceed-checkout-btn" disabled>
+            Proceed to Checkout
+          </button>
+        </div>
+      </section>
+
+      <!-- STAGE 4B: Digital Boarding Pass Confirmation -->
+      <section id="stage-ticket" class="stage-section" aria-labelledby="ticket-heading" hidden>
+        <div class="ticket-confirmation-wrap">
+          <div class="confirmation-banner">
+            <svg class="confirm-check-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" stroke="#10B981" stroke-width="2" />
+              <path d="M8 12.5L10.8 15.2L16.5 9.5" stroke="#10B981" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <div>
+              <h1 id="ticket-heading" class="confirmation-title">Ticket Confirmed in Database!</h1>
+              <p class="confirmation-subtitle">
+                Your seats are locked atomically in SQLite. Present this digital boarding pass at the auditorium entrance.
+              </p>
+            </div>
+          </div>
+
+          <article id="boarding-pass-card" class="boarding-pass glass-panel">
+            <!-- Populated dynamically -->
+          </article>
+
+          <div class="ticket-actions-row">
+            <button type="button" class="secondary-btn" id="cancel-current-ticket-btn">
+              Cancel This Booking
+            </button>
+            <button type="button" class="primary-btn" id="book-another-btn">
+              Book Another Ticket
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- STAGE 4A: Checkout Modal -->
+    <div class="modal-backdrop" id="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-modal-title" hidden>
+      <div class="modal-card glass-panel">
+        <div class="modal-header">
+          <div>
+            <h2 id="checkout-modal-title" class="modal-title">Complete Your Booking</h2>
+            <p class="modal-subtitle">Review fare breakdown and enter guest details</p>
+          </div>
+          <button type="button" class="icon-close-btn" id="close-checkout-btn" aria-label="Close checkout">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M5 5L15 15M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        <div id="checkout-summary" class="checkout-summary">
+          <!-- Populated dynamically -->
+        </div>
+
+        <form id="checkout-form" class="checkout-form" novalidate>
+          <div class="form-field">
+            <label for="customer-name">Full Name</label>
+            <input
+              type="text"
+              id="customer-name"
+              name="customer_name"
+              placeholder="e.g. Ananya Krishnan"
+              autocomplete="name"
+              required
+            />
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-field">
+              <label for="customer-email">Email Address</label>
+              <input
+                type="email"
+                id="customer-email"
+                name="customer_email"
+                placeholder="ananya@example.com"
+                autocomplete="email"
+                required
+              />
+            </div>
+
+            <div class="form-field">
+              <label for="customer-phone">Phone Number</label>
+              <input
+                type="tel"
+                id="customer-phone"
+                name="customer_phone"
+                placeholder="9840123456"
+                autocomplete="tel"
+                required
+              />
+            </div>
+          </div>
+
+          <p class="form-error-msg" id="checkout-error-msg" role="alert" hidden></p>
+
+          <div class="modal-footer">
+            <button type="button" class="secondary-btn" id="cancel-checkout-btn">Back to Seats</button>
+            <button type="submit" class="primary-btn" id="confirm-booking-btn">
+              Confirm &amp; Pay
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- My Bookings Lookup & Cancellation Modal -->
+    <div class="modal-backdrop" id="bookings-modal" role="dialog" aria-modal="true" aria-labelledby="bookings-modal-title" hidden>
+      <div class="modal-card modal-card-wide glass-panel">
+        <div class="modal-header">
+          <div>
+            <h2 id="bookings-modal-title" class="modal-title">My Bookings</h2>
+            <p class="modal-subtitle">Verify reservations or release booked seats back to inventory</p>
+          </div>
+          <button type="button" class="icon-close-btn" id="close-bookings-btn" aria-label="Close bookings">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M5 5L15 15M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        <form id="booking-search-form" class="search-bookings-row">
+          <input
+            type="text"
+            id="booking-ref-input"
+            placeholder="Search by reference (e.g. TIX-410829)"
+            aria-label="Booking reference"
+          />
+          <button type="submit" class="secondary-btn">Search</button>
+          <button type="button" class="ghost-btn" id="reset-bookings-search-btn">Show All</button>
+        </form>
+
+        <div id="bookings-list" class="bookings-list">
+          <!-- Populated dynamically via GET /api/bookings -->
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
