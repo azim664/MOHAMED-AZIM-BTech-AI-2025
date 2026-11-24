@@ -1,10 +1,28 @@
 /**
  * CineVault — Online Movie Ticket Booking System (ES6+ Vanilla JS SPA)
- * Communicates with the Python 3 + SQLite REST API via fetch()
+ * Connected to Supabase via VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY
+ * Loads movies from `movies`, showtimes from `showtimes`, and saves seat bookings into `bookings`.
  */
 
+import { createClient } from '@supabase/supabase-js';
+
+const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || '').trim();
+const SUPABASE_PUBLISHABLE_KEY = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim();
+
+const hasValidConfig =
+  Boolean(SUPABASE_URL) &&
+  Boolean(SUPABASE_PUBLISHABLE_KEY) &&
+  !SUPABASE_URL.includes('YOUR_PROJECT_REF') &&
+  !SUPABASE_PUBLISHABLE_KEY.includes('YOUR_SUPABASE');
+
+const supabase = hasValidConfig ? createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY) : null;
+
+const ROW_ORDER = ['A', 'B', 'C', 'D', 'E', 'F'];
+const COLS_PER_ROW = 10;
+const TOTAL_SEATS_PER_SHOW = ROW_ORDER.length * COLS_PER_ROW;
+
 const state = {
-  stage: 1, // 1: Movies, 2: Shows, 3: Seats, 4: Ticket
+  stage: 1, // 1: Movies, 2: Showtimes, 3: Seats, 4: Ticket
   movies: [],
   languageFilter: 'ALL',
   selectedMovie: null,
@@ -32,7 +50,7 @@ const els = {
   stageTicket: document.getElementById('stage-ticket'),
 
   moviesGrid: document.getElementById('movies-grid'),
-  filterTabs: document.querySelectorAll('.filter-tab'),
+  filterBar: document.getElementById('genre-filter-bar'),
 
   selectedMovieBanner: document.getElementById('selected-movie-banner'),
   theatersList: document.getElementById('theaters-list'),
@@ -84,43 +102,147 @@ function showToast(message, variant = 'info') {
 }
 
 // ---------------------------------------------------------------------------
-// API Helpers
+// Schema Normalization Helpers (Supports flexible column conventions)
 // ---------------------------------------------------------------------------
 
-async function apiRequest(url, options = {}) {
-  const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options,
-  });
-  let payload = {};
-  try {
-    payload = await response.json();
-  } catch {
-    payload = {};
-  }
-  if (!response.ok) {
-    const err = new Error(payload.error || `Request failed (${response.status})`);
-    err.status = response.status;
-    err.payload = payload;
-    throw err;
-  }
-  return payload;
+function normalizeMovie(row) {
+  return {
+    movie_id: row.id ?? row.movie_id,
+    title: row.title || 'Untitled Movie',
+    description: row.description || '',
+    duration_minutes: Number(row.duration_minutes ?? row.duration ?? 120),
+    language: row.language || 'English',
+    genre: row.genre || 'Cinema',
+    certification: row.certification || 'UA',
+    release_date: row.release_date || '',
+    poster_url: row.poster_url || '',
+  };
 }
 
-async function checkDatabaseHealth() {
-  try {
-    const data = await apiRequest('/api/health');
-    if (data.status === 'ok') {
-      els.dbPill.classList.remove('offline');
-      els.dbStatusText.textContent = 'Connected to Database (Live API)';
-      return true;
-    }
-  } catch {
-    // Handled below
+function normalizeShowtime(row, movie) {
+  return {
+    showtime_id: row.id ?? row.showtime_id ?? row.show_id,
+    movie_id: row.movie_id,
+    movie_title: movie?.title || row.movie_title || 'Selected Movie',
+    theater_name: row.theater_name || row.theater || 'Grand Cineplex',
+    theater_city: row.theater_city || row.city || '',
+    theater_address: row.theater_address || row.address || row.theater_city || 'Main Multiplex',
+    screen_name: row.screen_name || row.screen || 'Audi 1',
+    screen_type: row.screen_type || row.format || '2D',
+    show_date: row.show_date || '',
+    start_time: row.start_time || row.time || '',
+    end_time: row.end_time || '',
+    base_price: Number(row.base_price ?? row.price ?? 250),
+    status: row.status || 'SCHEDULED',
+  };
+}
+
+function extractSeatCodes(bookingRow) {
+  const raw = bookingRow.seat_codes ?? bookingRow.seats ?? bookingRow.seat_code ?? [];
+  if (Array.isArray(raw)) {
+    return raw.map((c) => String(c).trim().toUpperCase()).filter(Boolean);
   }
-  els.dbPill.classList.add('offline');
-  els.dbStatusText.textContent = 'Database Offline';
-  return false;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed.map((c) => String(c).trim().toUpperCase()).filter(Boolean);
+        }
+      } catch {
+        // Fall through to comma split
+      }
+    }
+    return trimmed
+      .split(',')
+      .map((c) => c.trim().toUpperCase())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function isActiveBooking(bookingRow) {
+  const status = String(bookingRow.booking_status || bookingRow.status || 'CONFIRMED').toUpperCase();
+  return status !== 'CANCELLED';
+}
+
+function buildSeatMatrixModel(basePrice, bookedSet) {
+  const seats = [];
+  for (const rowLabel of ROW_ORDER) {
+    const seatType =
+      rowLabel === 'A' || rowLabel === 'B'
+        ? 'STANDARD'
+        : rowLabel === 'C' || rowLabel === 'D'
+          ? 'PREMIUM'
+          : 'VIP';
+    const surcharge = seatType === 'STANDARD' ? 0 : seatType === 'PREMIUM' ? 50 : 100;
+    const seatPrice = Number(basePrice) + surcharge;
+
+    for (let seatNumber = 1; seatNumber <= COLS_PER_ROW; seatNumber += 1) {
+      const seatCode = `${rowLabel}${seatNumber}`;
+      seats.push({
+        seat_code: seatCode,
+        row_label: rowLabel,
+        seat_number: seatNumber,
+        seat_type: seatType,
+        seat_price: seatPrice,
+        status: bookedSet.has(seatCode) ? 'BOOKED' : 'AVAILABLE',
+      });
+    }
+  }
+  return seats;
+}
+
+function generateBookingReference() {
+  const num = Math.floor(100000 + Math.random() * 900000);
+  return `TIX-${num}`;
+}
+
+// ---------------------------------------------------------------------------
+// Supabase Health & Data Queries
+// ---------------------------------------------------------------------------
+
+async function checkSupabaseHealth() {
+  if (!supabase) {
+    els.dbPill.classList.add('offline');
+    els.dbStatusText.textContent = 'Supabase Not Configured';
+    return false;
+  }
+
+  try {
+    const { error } = await supabase.from('movies').select('*', { count: 'exact', head: true });
+    if (error) {
+      els.dbPill.classList.add('offline');
+      els.dbStatusText.textContent = 'Supabase Connection Error';
+      return false;
+    }
+    els.dbPill.classList.remove('offline');
+    els.dbStatusText.textContent = 'Connected to Supabase (Live)';
+    return true;
+  } catch {
+    els.dbPill.classList.add('offline');
+    els.dbStatusText.textContent = 'Supabase Unreachable';
+    return false;
+  }
+}
+
+async function fetchBookingsForShowtime(showtimeId) {
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('showtime_id', showtimeId);
+
+  if (!error) return data || [];
+
+  // Fallback if user schema uses `show_id` instead of `showtime_id`
+  if (String(error.message || '').includes('showtime_id')) {
+    const fallback = await supabase.from('bookings').select('*').eq('show_id', showtimeId);
+    if (fallback.error) throw new Error(fallback.error.message);
+    return fallback.data || [];
+  }
+
+  throw new Error(error.message);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,18 +279,59 @@ function goToStage(stageNum) {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 1: Movie Catalog
+// Stage 1: Movie Catalog (`movies` table)
 // ---------------------------------------------------------------------------
 
 async function loadMovies() {
-  els.moviesGrid.innerHTML = `<div class="empty-state">Loading active movies from SQLite database…</div>`;
+  if (!supabase) {
+    els.moviesGrid.innerHTML = `
+      <div class="empty-state" style="grid-column: 1 / -1;">
+        <strong>Supabase environment variables are not configured.</strong><br /><br />
+        Set <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_PUBLISHABLE_KEY</code> in your environment secrets, and run <code>schema.sql</code> in the Supabase SQL Editor to initialize the <code>movies</code>, <code>showtimes</code>, and <code>bookings</code> tables.
+      </div>
+    `;
+    return;
+  }
+
+  els.moviesGrid.innerHTML = `<div class="empty-state" style="grid-column: 1 / -1;">Loading movies from Supabase…</div>`;
+
   try {
-    const data = await apiRequest('/api/movies');
-    state.movies = data.movies || [];
+    const { data, error } = await supabase.from('movies').select('*');
+    if (error) throw new Error(error.message);
+
+    state.movies = (data || [])
+      .map(normalizeMovie)
+      .sort((a, b) => Number(a.movie_id) - Number(b.movie_id));
+
+    renderLanguageFilters();
     renderMovies();
   } catch (err) {
-    els.moviesGrid.innerHTML = `<div class="empty-state">Unable to load movies: ${escapeHtml(err.message)}</div>`;
+    els.moviesGrid.innerHTML = `
+      <div class="empty-state" style="grid-column: 1 / -1;">
+        Unable to load movies from Supabase: ${escapeHtml(err.message)}
+      </div>
+    `;
   }
+}
+
+function renderLanguageFilters() {
+  const languages = Array.from(new Set(state.movies.map((m) => m.language).filter(Boolean)));
+  const buttons = [
+    `<button type="button" class="filter-tab ${state.languageFilter === 'ALL' ? 'active' : ''}" data-lang="ALL">All Languages</button>`,
+    ...languages.map(
+      (lang) =>
+        `<button type="button" class="filter-tab ${state.languageFilter.toLowerCase() === lang.toLowerCase() ? 'active' : ''}" data-lang="${escapeHtml(lang)}">${escapeHtml(lang)}</button>`
+    ),
+  ];
+
+  els.filterBar.innerHTML = buttons.join('');
+  els.filterBar.querySelectorAll('.filter-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      state.languageFilter = tab.dataset.lang;
+      renderLanguageFilters();
+      renderMovies();
+    });
+  });
 }
 
 function renderMovies() {
@@ -178,7 +341,7 @@ function renderMovies() {
       : state.movies.filter((m) => m.language.toLowerCase() === state.languageFilter.toLowerCase());
 
   if (filtered.length === 0) {
-    els.moviesGrid.innerHTML = `<div class="empty-state">No movies found for ${escapeHtml(state.languageFilter)}.</div>`;
+    els.moviesGrid.innerHTML = `<div class="empty-state" style="grid-column: 1 / -1;">No movies found in the <code>movies</code> table.</div>`;
     return;
   }
 
@@ -206,7 +369,7 @@ function renderMovies() {
             <span>${escapeHtml(movie.language)}</span>
           </p>
           <p class="movie-desc">${escapeHtml(movie.description)}</p>
-          <button type="button" class="primary-btn full-width book-movie-btn" data-movie-id="${movie.movie_id}">
+          <button type="button" class="primary-btn full-width book-movie-btn" data-movie-id="${escapeHtml(movie.movie_id)}">
             Book Tickets
           </button>
         </div>
@@ -215,7 +378,6 @@ function renderMovies() {
     )
     .join('');
 
-  // Resilient image error fallback
   els.moviesGrid.querySelectorAll('.movie-poster-img').forEach((img) => {
     img.addEventListener('error', () => {
       img.hidden = true;
@@ -226,19 +388,18 @@ function renderMovies() {
 
   els.moviesGrid.querySelectorAll('.book-movie-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const movieId = Number(btn.dataset.movieId);
-      selectMovie(movieId);
+      selectMovie(btn.dataset.movieId);
     });
   });
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2: Venue & Showtime Selection
+// Stage 2: Venue & Showtime Selection (`showtimes` table)
 // ---------------------------------------------------------------------------
 
-async function selectMovie(movieId) {
-  const movie = state.movies.find((m) => m.movie_id === movieId);
-  if (!movie) return;
+async function selectMovie(movieIdRaw) {
+  const movie = state.movies.find((m) => String(m.movie_id) === String(movieIdRaw));
+  if (!movie || !supabase) return;
 
   state.selectedMovie = movie;
   state.selectedShow = null;
@@ -267,11 +428,58 @@ async function selectMovie(movieId) {
     </div>
   `;
 
-  els.theatersList.innerHTML = `<div class="empty-state">Querying theater schedules…</div>`;
+  els.theatersList.innerHTML = `<div class="empty-state">Loading showtimes from Supabase…</div>`;
 
   try {
-    const data = await apiRequest(`/api/shows?movie_id=${movieId}`);
-    state.shows = data.shows || [];
+    const { data: showRows, error } = await supabase
+      .from('showtimes')
+      .select('*')
+      .eq('movie_id', movie.movie_id);
+
+    if (error) throw new Error(error.message);
+
+    const normalizedShows = (showRows || [])
+      .map((r) => normalizeShowtime(r, movie))
+      .filter((s) => String(s.status).toUpperCase() !== 'CANCELLED')
+      .sort((a, b) => {
+        const tCmp = a.theater_name.localeCompare(b.theater_name);
+        if (tCmp !== 0) return tCmp;
+        const dCmp = String(a.show_date).localeCompare(String(b.show_date));
+        if (dCmp !== 0) return dCmp;
+        return String(a.start_time).localeCompare(String(b.start_time));
+      });
+
+    // Compute live available seat counts from `bookings`
+    const showIds = normalizedShows.map((s) => s.showtime_id);
+    const bookedCountsByShow = new Map();
+
+    if (showIds.length > 0) {
+      let bookingRows = [];
+      const bRes = await supabase.from('bookings').select('*').in('showtime_id', showIds);
+      if (!bRes.error) {
+        bookingRows = bRes.data || [];
+      } else if (String(bRes.error.message || '').includes('showtime_id')) {
+        const bFallback = await supabase.from('bookings').select('*').in('show_id', showIds);
+        bookingRows = bFallback.data || [];
+      }
+
+      for (const b of bookingRows) {
+        if (!isActiveBooking(b)) continue;
+        const sid = String(b.showtime_id ?? b.show_id);
+        const seats = extractSeatCodes(b);
+        if (!bookedCountsByShow.has(sid)) bookedCountsByShow.set(sid, new Set());
+        seats.forEach((code) => bookedCountsByShow.get(sid).add(code));
+      }
+    }
+
+    state.shows = normalizedShows.map((s) => {
+      const taken = bookedCountsByShow.get(String(s.showtime_id))?.size || 0;
+      return {
+        ...s,
+        available_seats: Math.max(0, TOTAL_SEATS_PER_SHOW - taken),
+      };
+    });
+
     renderTheatersAndShows();
   } catch (err) {
     els.theatersList.innerHTML = `<div class="empty-state">Failed to fetch showtimes: ${escapeHtml(err.message)}</div>`;
@@ -280,22 +488,21 @@ async function selectMovie(movieId) {
 
 function renderTheatersAndShows() {
   if (state.shows.length === 0) {
-    els.theatersList.innerHTML = `<div class="empty-state">No scheduled showtimes available for this title.</div>`;
+    els.theatersList.innerHTML = `<div class="empty-state">No scheduled showtimes found in <code>showtimes</code> for this movie.</div>`;
     return;
   }
 
-  // Group shows by theater_id
   const grouped = new Map();
   for (const show of state.shows) {
-    if (!grouped.has(show.theater_id)) {
-      grouped.set(show.theater_id, {
+    const key = show.theater_name;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
         theater_name: show.theater_name,
-        theater_city: show.theater_city,
         theater_address: show.theater_address,
         shows: [],
       });
     }
-    grouped.get(show.theater_id).shows.push(show);
+    grouped.get(key).shows.push(show);
   }
 
   els.theatersList.innerHTML = Array.from(grouped.values())
@@ -312,7 +519,7 @@ function renderTheatersAndShows() {
           ${theater.shows
             .map(
               (show) => `
-            <button type="button" class="showtime-pill" data-show-id="${show.show_id}">
+            <button type="button" class="showtime-pill" data-show-id="${escapeHtml(show.showtime_id)}">
               <span class="showtime-main">${escapeHtml(show.start_time)} | ${escapeHtml(show.screen_type)} • ${formatINRCompact(show.base_price)}</span>
               <span class="showtime-sub">${escapeHtml(show.screen_name)} · ${escapeHtml(show.show_date)} · ${show.available_seats} seats free</span>
             </button>
@@ -327,39 +534,44 @@ function renderTheatersAndShows() {
 
   els.theatersList.querySelectorAll('.showtime-pill').forEach((pill) => {
     pill.addEventListener('click', () => {
-      const showId = Number(pill.dataset.showId);
-      selectShow(showId);
+      selectShow(pill.dataset.showId);
     });
   });
 }
 
 // ---------------------------------------------------------------------------
-// Stage 3: Interactive 60-Seat Auditorium Matrix
+// Stage 3: Interactive 60-Seat Auditorium Matrix (Derived from `bookings`)
 // ---------------------------------------------------------------------------
 
-async function selectShow(showId) {
+async function selectShow(showtimeIdRaw) {
+  const show = state.shows.find((s) => String(s.showtime_id) === String(showtimeIdRaw));
+  if (!show) return;
+
+  state.selectedShow = show;
   state.selectedSeatCodes.clear();
   goToStage(3);
 
-  els.seatMatrix.innerHTML = `<div class="empty-state">Loading live 60-seat auditorium inventory…</div>`;
+  els.seatMatrix.innerHTML = `<div class="empty-state">Loading live seat availability from Supabase…</div>`;
   updateStickyBar();
 
-  await refreshShowSeats(showId);
+  await refreshShowSeats(show.showtime_id);
 }
 
-async function refreshShowSeats(showId) {
+async function refreshShowSeats(showtimeId) {
   try {
-    const data = await apiRequest(`/api/show-seats?show_id=${showId}`);
-    state.selectedShow = data.show;
-    state.seats = data.seats || [];
-    state.convenienceFee = Number(data.convenience_fee ?? 30);
-    state.maxSeats = Number(data.max_seats ?? 6);
+    const bookingRows = await fetchBookingsForShowtime(showtimeId);
+    const bookedSet = new Set();
 
-    // Prune any selected seats that became booked concurrently
-    const seatByCode = new Map(state.seats.map((s) => [s.seat_code, s]));
+    for (const row of bookingRows) {
+      if (!isActiveBooking(row)) continue;
+      extractSeatCodes(row).forEach((code) => bookedSet.add(code));
+    }
+
+    state.seats = buildSeatMatrixModel(state.selectedShow.base_price, bookedSet);
+
+    // Prune any selected seats that were booked concurrently
     for (const code of Array.from(state.selectedSeatCodes)) {
-      const seat = seatByCode.get(code);
-      if (!seat || seat.status === 'BOOKED') {
+      if (bookedSet.has(code)) {
         state.selectedSeatCodes.delete(code);
       }
     }
@@ -368,7 +580,7 @@ async function refreshShowSeats(showId) {
     renderSeatMatrix();
     updateStickyBar();
   } catch (err) {
-    els.seatMatrix.innerHTML = `<div class="empty-state">Error loading seats: ${escapeHtml(err.message)}</div>`;
+    els.seatMatrix.innerHTML = `<div class="empty-state">Error loading seat bookings: ${escapeHtml(err.message)}</div>`;
   }
 }
 
@@ -397,7 +609,6 @@ function renderSeatMatrix() {
     rowsMap.get(seat.row_label).push(seat);
   }
 
-  const rowOrder = ['A', 'B', 'C', 'D', 'E', 'F'];
   const tierHeaders = {
     A: 'STANDARD',
     C: 'PREMIUM',
@@ -406,7 +617,7 @@ function renderSeatMatrix() {
 
   let html = '';
 
-  for (const rowLabel of rowOrder) {
+  for (const rowLabel of ROW_ORDER) {
     const rowSeats = rowsMap.get(rowLabel) || [];
     if (rowSeats.length === 0) continue;
 
@@ -472,7 +683,6 @@ function toggleSeat(seatCode) {
     state.selectedSeatCodes.add(seatCode);
   }
 
-  // Update button states directly without rebuilding full DOM
   els.seatMatrix.querySelectorAll('.seat-btn:not(:disabled)').forEach((btn) => {
     const active = state.selectedSeatCodes.has(btn.dataset.seatCode);
     btn.classList.toggle('selected', active);
@@ -497,9 +707,9 @@ function computeSelectedSummary() {
 
   return {
     selectedCodes,
-    subtotal,
+    subtotal: Number(subtotal.toFixed(2)),
     convenienceFee: state.convenienceFee,
-    grandTotal: subtotal + (selectedCodes.length > 0 ? state.convenienceFee : 0),
+    grandTotal: Number((subtotal + (selectedCodes.length > 0 ? state.convenienceFee : 0)).toFixed(2)),
   };
 }
 
@@ -519,7 +729,7 @@ function updateStickyBar() {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 4A: Checkout Modal & Atomic Booking Submission
+// Stage 4A: Checkout Modal & Supabase `bookings` Insert
 // ---------------------------------------------------------------------------
 
 function openCheckoutModal() {
@@ -575,6 +785,11 @@ async function handleCheckoutSubmit(event) {
   event.preventDefault();
   els.checkoutErrorMsg.hidden = true;
 
+  if (!supabase) {
+    showCheckoutError('Supabase is not configured.');
+    return;
+  }
+
   const customerName = document.getElementById('customer-name').value.trim();
   const customerEmail = document.getElementById('customer-email').value.trim();
   const customerPhone = document.getElementById('customer-phone').value.replace(/[\s\-()]/g, '').trim();
@@ -592,41 +807,91 @@ async function handleCheckoutSubmit(event) {
     return;
   }
 
-  const { selectedCodes } = computeSelectedSummary();
-  if (selectedCodes.length === 0 || !state.selectedShow) {
+  const { selectedCodes, subtotal, convenienceFee, grandTotal } = computeSelectedSummary();
+  const show = state.selectedShow;
+  if (selectedCodes.length === 0 || !show) {
     showCheckoutError('No seats selected.');
     return;
   }
 
   els.confirmBookingBtn.disabled = true;
-  els.confirmBookingBtn.textContent = 'Locking Seats…';
+  els.confirmBookingBtn.textContent = 'Saving to Supabase…';
 
   try {
-    const result = await apiRequest('/api/bookings', {
-      method: 'POST',
-      body: JSON.stringify({
-        show_id: state.selectedShow.show_id,
-        seat_codes: selectedCodes,
-        customer_name: customerName,
-        customer_email: customerEmail,
-        customer_phone: customerPhone,
-      }),
-    });
+    // Re-check active bookings right before inserting to catch concurrent seat reservations
+    const latestBookings = await fetchBookingsForShowtime(show.showtime_id);
+    const bookedSet = new Set();
+    for (const row of latestBookings) {
+      if (!isActiveBooking(row)) continue;
+      extractSeatCodes(row).forEach((c) => bookedSet.add(c));
+    }
 
-    state.latestBooking = result.booking;
+    const conflicts = selectedCodes.filter((code) => bookedSet.has(code));
+    if (conflicts.length > 0) {
+      showCheckoutError(`Seats already booked: ${conflicts.join(', ')}. Seat map has been refreshed.`);
+      await refreshShowSeats(show.showtime_id);
+      return;
+    }
+
+    const bookingReference = generateBookingReference();
+    const record = {
+      booking_reference: bookingReference,
+      showtime_id: show.showtime_id,
+      seat_codes: selectedCodes,
+      customer_name: customerName,
+      customer_email: customerEmail,
+      customer_phone: customerPhone,
+      tickets_subtotal: subtotal,
+      convenience_fee: convenienceFee,
+      total_amount: grandTotal,
+      booking_status: 'CONFIRMED',
+    };
+
+    const { data: inserted, error } = await supabase
+      .from('bookings')
+      .insert([record])
+      .select()
+      .single();
+
+    if (error) {
+      if (String(error.message || '').includes('Seats already booked') || error.code === '23505') {
+        showCheckoutError(`${error.message}. Seat map has been refreshed.`);
+        await refreshShowSeats(show.showtime_id);
+        return;
+      }
+      throw new Error(error.message);
+    }
+
+    const confirmedBooking = {
+      booking_id: inserted?.id ?? inserted?.booking_id,
+      booking_reference: inserted?.booking_reference || bookingReference,
+      customer_name: customerName,
+      customer_email: customerEmail,
+      customer_phone: customerPhone,
+      showtime_id: show.showtime_id,
+      movie_title: show.movie_title,
+      theater_name: show.theater_name,
+      theater_address: show.theater_address,
+      screen_name: show.screen_name,
+      screen_type: show.screen_type,
+      show_date: show.show_date,
+      start_time: show.start_time,
+      seat_codes: selectedCodes,
+      tickets_subtotal: subtotal,
+      convenience_fee: convenienceFee,
+      total_amount: grandTotal,
+      booking_status: inserted?.booking_status || 'CONFIRMED',
+    };
+
+    state.latestBooking = confirmedBooking;
     state.selectedSeatCodes.clear();
     closeCheckoutModal();
     els.checkoutForm.reset();
-    renderBoardingPass(result.booking);
+    renderBoardingPass(confirmedBooking);
     goToStage(4);
-    showToast(`Booking ${result.booking.booking_reference} confirmed!`, 'success');
+    showToast(`Booking ${confirmedBooking.booking_reference} saved to Supabase!`, 'success');
   } catch (err) {
-    if (err.status === 409) {
-      showCheckoutError(`${err.message}. Seat map has been refreshed.`);
-      await refreshShowSeats(state.selectedShow.show_id);
-    } else {
-      showCheckoutError(err.message);
-    }
+    showCheckoutError(err.message);
   } finally {
     els.confirmBookingBtn.disabled = false;
     els.confirmBookingBtn.textContent = 'Confirm & Pay';
@@ -645,7 +910,7 @@ function showCheckoutError(msg) {
 function generateDeterministicQrSvg(seedText) {
   const size = 21;
   let hash = 2166136261;
-  for (let i = 0; i < seedText.length; i++) {
+  for (let i = 0; i < seedText.length; i += 1) {
     hash ^= seedText.charCodeAt(i);
     hash = Math.imul(hash, 16777619);
   }
@@ -664,8 +929,8 @@ function generateDeterministicQrSvg(seedText) {
   };
 
   let rects = '';
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
+  for (let r = 0; r < size; r += 1) {
+    for (let c = 0; c < size; c += 1) {
       const finder = isFinder(r, c);
       let dark = false;
       if (finder !== null) {
@@ -686,7 +951,9 @@ function generateDeterministicQrSvg(seedText) {
 
 function renderBoardingPass(booking) {
   const isCancelled = booking.booking_status === 'CANCELLED';
-  const qrSvg = generateDeterministicQrSvg(`${booking.booking_reference}|${booking.show_id}|${booking.seat_codes.join(',')}`);
+  const qrSvg = generateDeterministicQrSvg(
+    `${booking.booking_reference}|${booking.showtime_id}|${booking.seat_codes.join(',')}`
+  );
 
   els.boardingPassCard.innerHTML = `
     <div class="boarding-main">
@@ -695,7 +962,7 @@ function renderBoardingPass(booking) {
         <span class="boarding-status ${isCancelled ? 'cancelled' : ''}">${escapeHtml(booking.booking_status)}</span>
       </div>
       <h2 class="boarding-movie">${escapeHtml(booking.movie_title)}</h2>
-      <p class="boarding-theater">${escapeHtml(booking.theater_name)} · ${escapeHtml(booking.theater_address || '')}</p>
+      <p class="boarding-theater">${escapeHtml(booking.theater_name)}${booking.theater_address ? ` · ${escapeHtml(booking.theater_address)}` : ''}</p>
 
       <div class="boarding-details-grid">
         <div class="detail-cell">
@@ -736,17 +1003,23 @@ function renderBoardingPass(booking) {
 }
 
 async function handleCancelCurrentBooking() {
-  if (!state.latestBooking || state.latestBooking.booking_status === 'CANCELLED') return;
+  if (!supabase || !state.latestBooking || state.latestBooking.booking_status === 'CANCELLED') return;
   els.cancelCurrentTicketBtn.disabled = true;
 
   try {
-    const res = await apiRequest('/api/bookings/cancel', {
-      method: 'POST',
-      body: JSON.stringify({ booking_reference: state.latestBooking.booking_reference }),
-    });
+    const { error } = await supabase
+      .from('bookings')
+      .update({ booking_status: 'CANCELLED' })
+      .eq('booking_reference', state.latestBooking.booking_reference);
+
+    if (error) throw new Error(error.message);
+
     state.latestBooking.booking_status = 'CANCELLED';
     renderBoardingPass(state.latestBooking);
-    showToast(`Booking ${res.booking_reference} cancelled. Seats released: ${res.released_seats.join(', ')}`, 'info');
+    showToast(
+      `Booking ${state.latestBooking.booking_reference} cancelled. Seats released back to AVAILABLE.`,
+      'info'
+    );
   } catch (err) {
     showToast(err.message, 'error');
     els.cancelCurrentTicketBtn.disabled = false;
@@ -754,29 +1027,68 @@ async function handleCancelCurrentBooking() {
 }
 
 // ---------------------------------------------------------------------------
-// My Bookings Modal (Lookup & Cancel)
+// My Bookings Modal (Lookup & Cancel in Supabase `bookings`)
 // ---------------------------------------------------------------------------
 
 async function openBookingsModal(reference = '') {
   els.bookingsModal.hidden = false;
-  els.bookingsList.innerHTML = `<div class="empty-state">Fetching bookings from SQLite…</div>`;
+
+  if (!supabase) {
+    els.bookingsList.innerHTML = `<div class="empty-state">Supabase is not configured.</div>`;
+    return;
+  }
+
+  els.bookingsList.innerHTML = `<div class="empty-state">Fetching bookings from Supabase…</div>`;
+
   try {
-    const url = reference
-      ? `/api/bookings?reference=${encodeURIComponent(reference)}`
-      : '/api/bookings';
-    const data = await apiRequest(url);
-    renderBookingsList(data.bookings || []);
+    let query = supabase.from('bookings').select('*').order('created_at', { ascending: false }).limit(25);
+    if (reference) {
+      query = supabase.from('bookings').select('*').ilike('booking_reference', reference);
+    }
+
+    const { data: bookingRows, error } = await query;
+    if (error) throw new Error(error.message);
+
+    const rows = bookingRows || [];
+    if (rows.length === 0) {
+      els.bookingsList.innerHTML = `<div class="empty-state">No matching bookings found in Supabase.</div>`;
+      return;
+    }
+
+    // Fetch related showtimes & movies cleanly without assuming constraint names
+    const showIds = Array.from(new Set(rows.map((r) => r.showtime_id ?? r.show_id).filter(Boolean)));
+    const showMap = new Map();
+    if (showIds.length > 0) {
+      const { data: showRows } = await supabase.from('showtimes').select('*').in('id', showIds);
+      for (const s of showRows || []) {
+        showMap.set(String(s.id ?? s.showtime_id), s);
+      }
+    }
+
+    const movieMap = new Map(state.movies.map((m) => [String(m.movie_id), m]));
+
+    const enriched = rows.map((b) => {
+      const showRow = showMap.get(String(b.showtime_id ?? b.show_id));
+      const movie = showRow ? movieMap.get(String(showRow.movie_id)) : null;
+      return {
+        booking_reference: b.booking_reference,
+        booking_status: b.booking_status || 'CONFIRMED',
+        seat_codes: extractSeatCodes(b).join(', '),
+        total_amount: b.total_amount ?? 0,
+        movie_title: movie?.title || 'Movie Booking',
+        theater_name: showRow?.theater_name || 'Theater',
+        show_date: showRow?.show_date || '',
+        start_time: showRow?.start_time || '',
+      };
+    });
+
+    renderBookingsList(enriched);
   } catch (err) {
     els.bookingsList.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
   }
 }
 
 function renderBookingsList(bookings) {
-  if (bookings.length === 0) {
-    els.bookingsList.innerHTML = `<div class="empty-state">No matching bookings found in database.</div>`;
-    return;
-  }
-
   els.bookingsList.innerHTML = bookings
     .map((b) => {
       const cancelled = b.booking_status === 'CANCELLED';
@@ -785,7 +1097,7 @@ function renderBookingsList(bookings) {
           <div class="booking-history-main">
             <h4>${escapeHtml(b.movie_title)} · <span class="boarding-ref">${escapeHtml(b.booking_reference)}</span></h4>
             <p class="booking-history-meta">
-              ${escapeHtml(b.theater_name)} · ${escapeHtml(b.show_date)} ${escapeHtml(b.start_time)} · Seats: ${escapeHtml(b.seat_codes || 'Released')} · ${formatINR(b.total_amount)}
+              ${escapeHtml(b.theater_name)}${b.show_date ? ` · ${escapeHtml(b.show_date)} ${escapeHtml(b.start_time)}` : ''} · Seats: ${escapeHtml(b.seat_codes || 'None')} · ${formatINR(b.total_amount)}
             </p>
           </div>
           <div class="booking-history-actions">
@@ -806,14 +1118,17 @@ function renderBookingsList(bookings) {
       const ref = btn.dataset.ref;
       btn.disabled = true;
       try {
-        const res = await apiRequest('/api/bookings/cancel', {
-          method: 'POST',
-          body: JSON.stringify({ booking_reference: ref }),
-        });
-        showToast(`Released seats (${res.released_seats.join(', ')}) for ${ref}`, 'success');
+        const { error } = await supabase
+          .from('bookings')
+          .update({ booking_status: 'CANCELLED' })
+          .eq('booking_reference', ref);
+
+        if (error) throw new Error(error.message);
+
+        showToast(`Booking ${ref} cancelled and seats released.`, 'success');
         await openBookingsModal(els.bookingRefInput.value.trim());
         if (state.stage === 3 && state.selectedShow) {
-          await refreshShowSeats(state.selectedShow.show_id);
+          await refreshShowSeats(state.selectedShow.showtime_id);
         }
       } catch (err) {
         showToast(err.message, 'error');
@@ -838,15 +1153,6 @@ function bindEvents() {
       if (target < state.stage) {
         goToStage(target);
       }
-    });
-  });
-
-  els.filterTabs.forEach((tab) => {
-    tab.addEventListener('click', () => {
-      els.filterTabs.forEach((t) => t.classList.remove('active'));
-      tab.classList.add('active');
-      state.languageFilter = tab.dataset.lang;
-      renderMovies();
     });
   });
 
@@ -879,7 +1185,6 @@ function bindEvents() {
     openBookingsModal('');
   });
 
-  // Close modals on backdrop click or Escape
   [els.checkoutModal, els.bookingsModal].forEach((modal) => {
     modal.addEventListener('click', (e) => {
       if (e.target === modal) modal.hidden = true;
@@ -895,7 +1200,7 @@ function bindEvents() {
 
 async function init() {
   bindEvents();
-  await checkDatabaseHealth();
+  await checkSupabaseHealth();
   await loadMovies();
 }
 

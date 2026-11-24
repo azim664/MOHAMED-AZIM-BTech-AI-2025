@@ -6,12 +6,12 @@
     <title>CineVault — Movie Ticket Booking</title>
     <meta
       name="description"
-      content="Decoupled 3-tier online movie ticket booking system with a SQLite/MySQL relational database backend and a dark glassmorphic single-page application."
+      content="Online movie ticket booking single-page application connected to Supabase PostgreSQL (movies, showtimes, and bookings)."
     />
     <meta property="og:title" content="CineVault — Movie Ticket Booking" />
     <meta
       property="og:description"
-      content="Decoupled 3-tier online movie ticket booking system with a SQLite/MySQL relational database backend and a dark glassmorphic single-page application."
+      content="Online movie ticket booking single-page application connected to Supabase PostgreSQL (movies, showtimes, and bookings)."
     />
     <meta property="og:type" content="website" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -44,7 +44,7 @@
 
         <div class="db-status-pill" id="db-status-pill" role="status" aria-live="polite">
           <span class="db-status-indicator" aria-hidden="true"></span>
-          <span id="db-status-text">Connecting to Database…</span>
+          <span id="db-status-text">Connecting to Supabase…</span>
         </div>
       </div>
     </header>
@@ -90,14 +90,11 @@
           </div>
           <div class="filter-bar" id="genre-filter-bar" role="tablist" aria-label="Filter movies by language">
             <button type="button" class="filter-tab active" data-lang="ALL">All Languages</button>
-            <button type="button" class="filter-tab" data-lang="English">English</button>
-            <button type="button" class="filter-tab" data-lang="Hindi">Hindi</button>
-            <button type="button" class="filter-tab" data-lang="Tamil">Tamil</button>
           </div>
         </div>
 
         <div id="movies-grid" class="movies-grid">
-          <!-- Populated dynamically via GET /api/movies -->
+          <!-- Populated dynamically from Supabase movies table -->
         </div>
       </section>
 
@@ -118,11 +115,11 @@
 
         <div class="venues-header">
           <h2 id="shows-heading" class="section-title">Select Theater &amp; Showtime</h2>
-          <p class="section-caption">Live schedules queried across theaters and projection screens</p>
+          <p class="section-caption">Live schedules queried from Supabase showtimes</p>
         </div>
 
         <div id="theaters-list" class="theaters-list">
-          <!-- Populated dynamically via GET /api/shows?movie_id={id} -->
+          <!-- Populated dynamically from Supabase showtimes table -->
         </div>
       </section>
 
@@ -173,7 +170,7 @@
           <!-- Interactive 60-Seat Grid -->
           <div class="seat-matrix-scroll">
             <div id="seat-matrix" class="seat-matrix" role="group" aria-label="60 seat auditorium layout">
-              <!-- Populated dynamically via GET /api/show-seats?show_id={id} -->
+              <!-- Populated dynamically from Supabase bookings -->
             </div>
           </div>
         </div>
@@ -205,9 +202,9 @@
               <path d="M8 12.5L10.8 15.2L16.5 9.5" stroke="#10B981" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
             <div>
-              <h1 id="ticket-heading" class="confirmation-title">Ticket Confirmed in Database!</h1>
+              <h1 id="ticket-heading" class="confirmation-title">Ticket Confirmed in Supabase!</h1>
               <p class="confirmation-subtitle">
-                Your seats are locked atomically in SQLite. Present this digital boarding pass at the auditorium entrance.
+                Your seat reservation has been saved to the bookings table. Present this digital boarding pass at the auditorium entrance.
               </p>
             </div>
           </div>
